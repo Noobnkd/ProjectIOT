@@ -1,6 +1,3 @@
-
-
-
 #define BLYNK_TEMPLATE_ID "TMPL6zSsTrVXM"
 #define BLYNK_TEMPLATE_NAME "MonitoringSystem"
 #define BLYNK_AUTH_TOKEN "xtVA8QBnk8vzow7ooSaV2w0jWA_IJTsc"
@@ -15,11 +12,24 @@
 #include <ArduinoJson.h>
 
 // GPIO
-#define RED_LED       D1
-#define PIR_SENSOR    D3
-#define DOOR_SENSOR   D2
-#define RX_FINGER     D5
-#define TX_FINGER     D6
+// #define DOOR_LED      D1
+// #define BUZZER_LED    D3
+// #define PIR_SENSOR    D7
+// #define DOOR_SENSOR   D2
+// #define RX_FINGER     D5
+// #define TX_FINGER     D6
+// #define BUZZER_SENSOR D4
+
+#define DOOR_LED        D1     
+#define DOOR_SENSOR     D2     
+#define BUZZER_SENSOR   D3
+#define RX_FINGER       D5
+#define TX_FINGER       D6
+#define PIR_SENSOR      D7
+#define GREEN_LED       D8     
+
+
+
 
 SoftwareSerial mySerial(RX_FINGER, TX_FINGER);
 Adafruit_Fingerprint finger(&mySerial);
@@ -30,7 +40,8 @@ bool alarmEnabled = true; // Trạng thái hệ thống báo động
 
 // ======= Biến trạng thái trước đó ======= //
 bool prevDoorClosed = false;
-bool prevLedState = false;
+bool prevLedRedState = false;
+bool prevLedGreenState = false;
 String prevMotionStatus = "";
 String prevFingerprintStatus = "";
 
@@ -39,7 +50,7 @@ String ssid_sta, pass_sta, blynk_token, device_location;
 bool configMode = false;
 
 // Trạng thái hệ thống
-unsigned long previousMillis = 0;
+//unsigned long previousMillis = 0;
 unsigned long lastMotionMillis = 0;
 bool allowScan = true;
 bool ignoreMotion = false;
@@ -99,10 +110,14 @@ void loadConfig() {
 
 // ======= Setup chính ======= //
 void setup() {
-  pinMode(RED_LED, OUTPUT);
+  pinMode(DOOR_LED, OUTPUT);
+  pinMode(GREEN_LED,OUTPUT);
   pinMode(PIR_SENSOR, INPUT);
   pinMode(DOOR_SENSOR, INPUT_PULLUP);
-  digitalWrite(RED_LED, LOW);
+  pinMode(BUZZER_SENSOR,OUTPUT);
+  digitalWrite(DOOR_LED, LOW);
+  digitalWrite(GREEN_LED,LOW);
+  digitalWrite(BUZZER_SENSOR,HIGH);
 
   Serial.begin(9600);
   mySerial.begin(57600);
@@ -184,6 +199,24 @@ String getTimestamp() {
 }
 
 
+
+
+
+bool authorizedEntry = false;     // Đã được xác thực vân tay
+unsigned long fingerprintMillis = 0;  // Thời điểm xác thực gần nhất
+//bool fingerprintChecked = false; 
+int failedAttempts = 0;  // Biến đếm số lần thử không thành công
+const int maxAttempts = 5;  // Giới hạn số lần thử tối đa
+bool lockoutActive = false;
+unsigned long lockoutStart = 0;
+const unsigned long lockoutDuration = 30000; // 30 giây
+bool buzzerActive = false;
+
+bool isFingerPressed() {
+  return (finger.getImage() == FINGERPRINT_OK);
+}
+
+
 BLYNK_WRITE(V6) {
   int state = param.asInt();
   alarmEnabled = (state == 1);
@@ -193,28 +226,28 @@ BLYNK_WRITE(V6) {
   } else {
     Serial.println("🔕 Hệ thống cảnh báo TẮT.");
     terminal.println("🔕 Cảnh báo ĐÃ TẮT");
+    buzzerActive = false;
   }
   terminal.flush();
 }
 
-
-bool authorizedEntry = false;     // Đã được xác thực vân tay
-unsigned long fingerprintMillis = 0;  // Thời điểm xác thực gần nhất
-bool fingerprintChecked = false;
-int failedAttempts = 0;  // Biến đếm số lần thử không thành công
-const int maxAttempts = 5;  // Giới hạn số lần thử tối đa
-bool lockoutActive = false;
-unsigned long lockoutStart = 0;
-const unsigned long lockoutDuration = 30000; // 60 giây
-
-bool isFingerPressed() {
-  return (finger.getImage() == FINGERPRINT_OK);
+BLYNK_CONNECTED() {
+  // Thiết bị chủ động gửi trạng thái hiện tại lên app
+  Blynk.virtualWrite(V6, alarmEnabled ? 1 : 0);
+  Blynk.virtualWrite(V1, digitalRead(DOOR_SENSOR) ? "Cửa Đóng" : "Cửa Mở");
+  Blynk.virtualWrite(V2, digitalRead(PIR_SENSOR) ? "Phát hiện chuyển động" : "Chưa có phát hiện mới");
+  Blynk.virtualWrite(V3, digitalRead(DOOR_LED) ? 255 : 0);
+  Blynk.virtualWrite(V5, digitalRead(GREEN_LED) ? 255 : 0);  
 }
 
 
 // ======= Loop chính ======= //
 void loop() {
-  if (!configMode) Blynk.run();
+  if (!configMode) {
+    Blynk.run();
+  }else{
+    return;
+  }
   unsigned long now = millis();
 
   // ======= Kiểm tra trạng thái cửa ======= //
@@ -232,21 +265,47 @@ void loop() {
       authorizedEntry = false;
       allowScan = true;
       Serial.println("✅ Hệ thống cảnh báo đã kích hoạt lại sau khi cửa đóng.");
+
+      motionDetected = false;
+      if (prevMotionStatus != "no_motion") {
+        Blynk.virtualWrite(V2, "Chưa có phát hiện mới");
+        prevMotionStatus = "no_motion";
+      }
     }
   }
 
   // ======= Quản lý đèn LED ======= //
-  bool ledState;
+  bool ledRedState;
+  bool ledGreenState;
   if (!alarmEnabled) {
-    ledState = true;  // Luôn bật nếu cảnh báo tắt
+    ledRedState = true;  // Luôn tắt nếu cảnh báo tắt
   } else {
-    ledState = doorClosed;  // LED theo cửa nếu cảnh báo bật
+    ledRedState = doorClosed;  // LED theo cửa nếu cảnh báo bật
   }
 
-  if (ledState != prevLedState) {
-    Blynk.virtualWrite(V3, ledState ? 255 : 0);
-    digitalWrite(RED_LED, ledState ? HIGH : LOW);
-    prevLedState = ledState;
+  if (ledRedState != prevLedRedState) {
+    Blynk.virtualWrite(V3, ledRedState ? 0 : 255);
+    digitalWrite(DOOR_LED, ledRedState ? LOW : HIGH);
+    prevLedRedState = ledRedState;
+  }
+
+  if(authorizedEntry){
+    ledGreenState = true;
+  }else{
+    ledGreenState = false;
+  }
+
+  if(ledGreenState != prevLedGreenState){
+    Blynk.virtualWrite(V5,ledGreenState ? 255:0);
+    digitalWrite(GREEN_LED, ledGreenState ? HIGH:LOW);
+    prevLedGreenState = ledGreenState;
+  }
+
+  // ======= Phát loa cảnh báo nếu điều kiện đúng =======//
+  if(!buzzerActive){
+    digitalWrite(BUZZER_SENSOR, HIGH);
+  }else{
+    digitalWrite(BUZZER_SENSOR, LOW);
   }
 
   if (!alarmEnabled) return;
@@ -254,12 +313,14 @@ void loop() {
   // ======= Tự động cho phép xác thực lại sau 30s ======= //
   if (!allowScan && now - fingerprintMillis >= 30000) {
     allowScan = true;
+    buzzerActive = false;
   }
 
   // ======= Kiểm tra khóa xác thực (sau khi vượt quá số lần) ======= //
   if (lockoutActive) {
     if (now - lockoutStart >= lockoutDuration) {
       lockoutActive = false;
+      buzzerActive = false;
       Blynk.virtualWrite(V0, "🔓 Cho phép xác thực lại.");
       terminal.println("🔓 " + getTimestamp() + " - " + device_location + ": Hết thời gian khoá. Có thể xác thực lại.");
       terminal.flush();
@@ -269,6 +330,16 @@ void loop() {
     }
   }
 
+  // ======= Kiểm tra reset trạng thái xác thực sau 30s nếu cửa không mở ======= //
+  if (authorizedEntry && doorClosed && (now - fingerprintMillis >= 30000)) {
+    authorizedEntry = false;
+    allowScan = true;
+
+    Blynk.virtualWrite(V0, "⚠️ Cửa không mở trong 30 giây. Vui lòng xác thực lại.");
+    terminal.println("⚠️ " + getTimestamp() + " - " + device_location + ": Cửa không mở sau xác thực. Yêu cầu xác thực lại.");
+    terminal.flush();
+    Serial.println("⚠️ Cửa vẫn đóng sau xác thực. Reset trạng thái.");
+  }
   
   // ======= Kiểm tra vân tay khi cửa ĐÓNG và cho phép xác thực ======= //
   if (allowScan && doorClosed && !authorizedEntry && isFingerPressed()) {
@@ -277,6 +348,7 @@ void loop() {
       allowScan = false;
       fingerprintMillis = now;
       failedAttempts = 0;
+      buzzerActive = false;
 
       Blynk.virtualWrite(V0, "✅ Fingerprint OK");
       terminal.println("✅ " + getTimestamp() + " - " + device_location + ": Vân tay hợp lệ!");
@@ -298,18 +370,18 @@ void loop() {
         lockoutActive = true;
         lockoutStart = now;
         failedAttempts = 0;
-      }
-    }
-  }
-
-
-
+        buzzerActive = true;
+      }    
+    }    
+  }  
+  
 
   // ======= Nếu đã mở cửa và chưa xác thực: kiểm tra chuyển động ======= //
   if (!doorClosed && !authorizedEntry) {
     if (digitalRead(PIR_SENSOR) == HIGH && !motionDetected) {
       motionDetected = true;
       lastMotionMillis = now;
+      buzzerActive = true;
 
       if (prevMotionStatus != "motion") {
         Blynk.virtualWrite(V2, "Phát hiện chuyển động");
@@ -325,6 +397,7 @@ void loop() {
     // Sau 30s không có chuyển động -> cập nhật lại
     if (motionDetected && now - lastMotionMillis >= 30000) {
       motionDetected = false;
+      buzzerActive = false;
       if (prevMotionStatus != "no_motion") {
         Blynk.virtualWrite(V2, "Chưa có phát hiện mới");
         prevMotionStatus = "no_motion";
@@ -332,5 +405,3 @@ void loop() {
     }
   }
 }
-
-

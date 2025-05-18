@@ -11,14 +11,7 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 
-// GPIO
-// #define DOOR_LED      D1
-// #define BUZZER_LED    D3
-// #define PIR_SENSOR    D7
-// #define DOOR_SENSOR   D2
-// #define RX_FINGER     D5
-// #define TX_FINGER     D6
-// #define BUZZER_SENSOR D4
+
 
 #define DOOR_LED        D1     
 #define DOOR_SENSOR     D2     
